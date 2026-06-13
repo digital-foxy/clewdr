@@ -19,7 +19,8 @@ use crate::{
     middleware::claude::{ClaudeApiFormat, ClaudeContext},
     types::{
         claude::{
-            ContentBlock, CreateMessageParams, Message, MessageContent, Role, Thinking, Usage,
+            ContentBlock, CreateMessageParams, Message, MessageContent, OutputConfig,
+            OutputEffort, Role, Thinking, Usage,
         },
         oai::CreateMessageParams as OaiCreateMessageParams,
     },
@@ -208,6 +209,89 @@ fn extract_anthropic_beta_header(headers: &HeaderMap) -> Option<String> {
     }
 }
 
+/// Modern strict families: reject non-default sampling (temperature/top_p/
+/// top_k 400) and default to `Thinking::Adaptive` on the -thinking suffix.
+/// Opus 4.7/4.8 are adaptive-ONLY (enabled+budget 400s); Fable 5 accepts
+/// both thinking modes but adaptive+summarized is the right default.
+fn is_adaptive_only_family(model: &str) -> bool {
+    model.starts_with("claude-opus-4-7")
+        || model.starts_with("claude-opus-4-8")
+        || model.starts_with("claude-fable-5")
+        || model.starts_with("claude-sonnet-5")
+}
+
+/// Families that DO NOT accept `output_config.effort` (per Anthropic docs).
+/// For these we back-fill `Thinking::Enabled { budget_tokens }` from the OAI
+/// effort hint so OAI clients keep getting extended reasoning, and clear
+/// `output_config` since it would be ignored upstream anyway.
+///
+/// Models that DO accept effort: Opus 4.5 / 4.6 / 4.7 / 4.8, Sonnet 4.6, Mythos.
+/// Models that DO NOT: 3.7 Sonnet, Sonnet 4 (20250514), Sonnet 4.5, Opus 4
+/// (20250514), Opus 4.1.
+fn is_pre_effort_family(model: &str) -> bool {
+    model.starts_with("claude-3-7-sonnet")
+        || model.starts_with("claude-sonnet-4-20")
+        || model.starts_with("claude-sonnet-4-5")
+        || model.starts_with("claude-opus-4-20")
+        || model.starts_with("claude-opus-4-1-")
+}
+
+fn effort_to_budget(e: &OutputEffort) -> u64 {
+    match e {
+        OutputEffort::Low => 1024,
+        OutputEffort::Medium => 4096,
+        OutputEffort::High => 16384,
+        OutputEffort::Max => 32768,
+    }
+}
+
+/// Per-family wire-shape fixes applied once at NormalizeRequest time.
+/// Covers every caller (OAI translation, native Claude passthrough,
+/// -thinking suffix path).
+fn apply_model_family_fixes(body: &mut CreateMessageParams) {
+    let model = body.model.as_str();
+
+    // Opus 4.7/4.8 specifics.
+    if is_adaptive_only_family(model) {
+        // Anthropic 400s on non-default sampling for 4.7/4.8.
+        body.temperature = None;
+        body.top_p = None;
+        body.top_k = None;
+        // On 4.7/4.8 the API default for `thinking.display` is `omitted` —
+        // empty thinking blocks. Force `summarized` whenever adaptive
+        // thinking is on so client thinking UIs (SillyTavern, JAI) populate.
+        if let Some(Thinking::Adaptive { display }) = body.thinking.as_mut()
+            && display.is_none()
+        {
+            *display = Some("summarized".to_string());
+        }
+    }
+
+    // Effort handling per family.
+    if is_pre_effort_family(model) {
+        // Pre-effort families ignore output_config. Back-fill thinking from
+        // any effort hint so OAI clients sending reasoning_effort still get
+        // extended reasoning, then clear output_config so it's not sent.
+        if body.thinking.is_none()
+            && let Some(effort) = body.output_config.as_ref().and_then(|c| c.effort.as_ref())
+        {
+            body.thinking = Some(Thinking::new(effort_to_budget(effort)));
+        }
+        body.output_config = None;
+    } else {
+        // All families that accept output_config.effort (Opus 4.5/4.6/4.7/4.8,
+        // Sonnet 4.6, Mythos): default to Max when caller sent none.
+        // Caller-supplied effort always wins.
+        let cfg = body.output_config.get_or_insert(OutputConfig {
+            effort: None,
+            format: None,
+        });
+        if cfg.effort.is_none() {
+            cfg.effort = Some(OutputEffort::Max);
+        }
+    }
+}
+
 fn sanitize_messages(msgs: Vec<Message>) -> Vec<Message> {
     msgs.into_iter()
         .filter_map(|m| {
@@ -274,8 +358,24 @@ where
         }
         if body.model.ends_with("-thinking") {
             body.model = body.model.trim_end_matches("-thinking").to_string();
-            body.thinking.get_or_insert(Thinking::new(4096));
+            let default = if is_adaptive_only_family(&body.model) {
+                Thinking::Adaptive {
+                    display: Some("summarized".to_string()),
+                }
+            } else {
+                // Derive budget from effort hint if present (e.g. OAI reasoning_effort),
+                // else fall back to the default 4096 budget.
+                let budget = body
+                    .output_config
+                    .as_ref()
+                    .and_then(|c| c.effort.as_ref())
+                    .map(effort_to_budget)
+                    .unwrap_or(4096);
+                Thinking::new(budget)
+            };
+            body.thinking.get_or_insert(default);
         }
+        apply_model_family_fixes(&mut body);
         drop_empty_system(&mut body);
         Ok(Self(body, format))
     }

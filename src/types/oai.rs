@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use serde_with::{DefaultOnError, serde_as};
 use tiktoken_rs::o200k_base;
 
 use super::claude::{CreateMessageParams as ClaudeCreateMessageParams, *};
@@ -40,13 +41,25 @@ fn normalize_message(msg: Message) -> Option<Message> {
     })
 }
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 pub enum Effort {
-    Low = 256,
+    Low,
     #[default]
-    Medium = 256 * 8,
-    High = 256 * 8 * 8,
+    Medium,
+    High,
+    Max,
+}
+
+impl From<Effort> for OutputEffort {
+    fn from(e: Effort) -> Self {
+        match e {
+            Effort::Low => OutputEffort::Low,
+            Effort::Medium => OutputEffort::Medium,
+            Effort::High => OutputEffort::High,
+            Effort::Max => OutputEffort::Max,
+        }
+    }
 }
 
 impl From<CreateMessageParams> for ClaudeCreateMessageParams {
@@ -78,9 +91,7 @@ impl From<CreateMessageParams> for ClaudeCreateMessageParams {
             context_management: None,
             mcp_servers: None,
             stop_sequences: params.stop,
-            thinking: params
-                .thinking
-                .or_else(|| params.reasoning_effort.map(|e| Thinking::new(e as u64))),
+            thinking: params.thinking,
             temperature: params.temperature,
             stream: params.stream,
             top_k: params.top_k,
@@ -88,7 +99,13 @@ impl From<CreateMessageParams> for ClaudeCreateMessageParams {
             tools: params.tools,
             tool_choice: params.tool_choice,
             metadata: params.metadata,
-            output_config: None,
+            // OAI reasoning_effort maps onto Claude output_config.effort.
+            // Per-family normalization (e.g. back-fill thinking for pre-4.5 models)
+            // runs later in middleware/claude/request.rs.
+            output_config: params.reasoning_effort.map(|e| OutputConfig {
+                effort: Some(e.into()),
+                format: None,
+            }),
             output_format: None,
             service_tier: None,
             n: params.n,
@@ -96,6 +113,7 @@ impl From<CreateMessageParams> for ClaudeCreateMessageParams {
     }
 }
 
+#[serde_as]
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct CreateMessageParams {
     /// Maximum number of tokens to generate
@@ -107,7 +125,11 @@ pub struct CreateMessageParams {
     pub messages: Vec<Message>,
     /// Model to use
     pub model: String,
-    /// Reasoning effort for response generation
+    /// Reasoning effort for response generation. Unknown values
+    /// (e.g. OpenAI's `"minimal"` / `"none"`) degrade to None instead
+    /// of failing the whole request.
+    #[serde(default)]
+    #[serde_as(deserialize_as = "DefaultOnError")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<Effort>,
     /// Frequency penalty for response generation

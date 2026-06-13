@@ -11,7 +11,7 @@ pub struct RequiredMessageParams {
 }
 
 pub(super) fn default_max_tokens() -> u32 {
-    8192
+    64_000
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -154,7 +154,9 @@ impl CreateMessageParams {
 #[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Thinking {
-    Enabled { budget_tokens: u64 },
+    Enabled {
+        budget_tokens: u64,
+    },
     Disabled,
     Adaptive {
         #[serde(default, skip_serializing_if = "Option::is_none")]

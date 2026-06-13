@@ -145,8 +145,14 @@ impl ClaudeWebState {
         // preserve original params for possible post-call token accounting
         self.last_params = Some(p.clone());
         let mut body = json!({});
-        // enable thinking mode
-        body["settings"]["paprika_mode"] = if p.thinking.is_some() && self.is_pro() {
+        // Trip extended Paprika mode on Pro accounts when either an explicit
+        // `thinking` field or an `output_config.effort` hint (OAI surface) is set.
+        let wants_extended = p.thinking.is_some()
+            || p.output_config
+                .as_ref()
+                .and_then(|c| c.effort.as_ref())
+                .is_some();
+        body["settings"]["paprika_mode"] = if wants_extended && self.is_pro() {
             "extended".into()
         } else {
             json!(null)

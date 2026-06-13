@@ -239,7 +239,7 @@ pub async fn api_auth(AuthBearer(t): AuthBearer) -> StatusCode {
     StatusCode::OK
 }
 
-const MODEL_LIST: [&str; 26] = [
+const MODEL_LIST: &[&str] = &[
     "claude-3-7-sonnet-20250219",
     "claude-3-7-sonnet-20250219-thinking",
     "claude-sonnet-4-20250514",
@@ -266,6 +266,15 @@ const MODEL_LIST: [&str; 26] = [
     "claude-opus-4-6-thinking",
     "claude-opus-4-6-1M",
     "claude-opus-4-6-1M-thinking",
+    // 1M is the default context window on Opus 4.7/4.8 (no beta header), so no -1M variants.
+    "claude-opus-4-7",
+    "claude-opus-4-7-thinking",
+    "claude-opus-4-8",
+    "claude-opus-4-8-thinking",
+    "claude-fable-5",
+    "claude-fable-5-thinking",
+    "claude-sonnet-5",
+    "claude-sonnet-5-thinking",
 ];
 
 /// API endpoint to get the list of available models
